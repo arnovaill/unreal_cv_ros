@@ -4,6 +4,7 @@
 import rospy
 from unreal_cv_ros.msg import UeSensorRaw
 from sensor_msgs.msg import PointCloud2, PointField, Image
+from geometry_msgs.msg import PoseStamped
 
 # Image conversion
 import io
@@ -17,6 +18,8 @@ import numpy as np
 from struct import pack, unpack
 import time
 
+import tf
+
 
 class SensorModel:
 
@@ -26,10 +29,13 @@ class SensorModel:
         # Read in params
         model_type_in = rospy.get_param('~model_type', 'ground_truth')
         camera_params_ns = rospy.get_param('~camera_params_ns', rospy.get_namespace()+"unreal_ros_client/camera_params")
-        self.publish_color_images = rospy.get_param('~publish_color_images', False)
+        self.publish_depth_images = rospy.get_param('~publish_depth_images', True)
+        self.publish_color_images = rospy.get_param('~publish_color_images', True)
+        self.publish_camera_pose = rospy.get_param('~publish_camera_pose', True)
         self.publish_gray_images = rospy.get_param('~publish_gray_images', False)
         self.maximum_distance = rospy.get_param('~maximum_distance', 0)  # Set to 0 to keep all points
         self.flatten_distance = rospy.get_param('~flatten_distance', 0)  # Set to 0 to ignore
+
 
         # Setup sensor type
         model_types = {'ground_truth': 'ground_truth', 'kinect': 'kinect',
@@ -61,10 +67,15 @@ class SensorModel:
         # Initialize node
         self.pub = rospy.Publisher("~ue_sensor_out", PointCloud2, queue_size=10)
         self.sub = rospy.Subscriber("ue_sensor_raw", UeSensorRaw, self.callback, queue_size=10)
-        if self.publish_color_images or self.publish_gray_images:
+        if self.publish_color_images or self.publish_gray_images or self.publish_depth_images:
             self.cv_bridge = cv_bridge.CvBridge()
+        if self.publish_depth_images:
+            self.depth_img_pub = rospy.Publisher("~ue_depth_image_out", Image, queue_size=10)
         if self.publish_color_images:
             self.color_img_pub = rospy.Publisher("~ue_color_image_out", Image, queue_size=10)
+        if self.publish_camera_pose:
+            self.tf_listener = tf.TransformListener()
+            self.camera_pose_publisher = rospy.Publisher("~camera_pose", PoseStamped, queue_size=10)
         if self.publish_gray_images:
             self.gray_img_pub = rospy.Publisher("~ue_gray_image_out", Image, queue_size=10)
 
@@ -119,11 +130,31 @@ class SensorModel:
         self.pub.publish(msg)
 
         # If requested, also publish the image
+        if self.publish_depth_images:
+            img_msg = self.cv_bridge.cv2_to_imgmsg(img_depth, "32FC1")
+            img_msg.header.stamp = ros_data.header.stamp
+            img_msg.header.frame_id = 'camera'
+            self.depth_img_pub.publish(img_msg)
         if self.publish_color_images:
-            img_msg = self.cv_bridge.cv2_to_imgmsg(img_color, "rgba8")
+            img_msg = self.cv_bridge.cv2_to_imgmsg(img_color[:, :, 0:3], "rgb8") # originally rgba8
             img_msg.header.stamp = ros_data.header.stamp
             img_msg.header.frame_id = 'camera'
             self.color_img_pub.publish(img_msg)
+        if self.publish_camera_pose:
+            try:
+                (trans,rot) = self.tf_listener.lookupTransform('/world', '/camera', ros_data.header.stamp)    
+                pose_msg = PoseStamped()
+                pose_msg.header.stamp = ros_data.header.stamp
+                pose_msg.pose.position.x = trans[0]
+                pose_msg.pose.position.y = trans[1]
+                pose_msg.pose.position.z = trans[2]
+                pose_msg.pose.orientation.x = rot[0]
+                pose_msg.pose.orientation.y = rot[1]
+                pose_msg.pose.orientation.z = rot[2]
+                pose_msg.pose.orientation.w = rot[3]
+                self.camera_pose_publisher.publish(pose_msg)
+            except:
+                rospy.logerr('TF could not get camera pose')
         if self.publish_gray_images:
             img_msg = self.cv_bridge.cv2_to_imgmsg(cv2.cvtColor(img_color[:, :, 0:3], cv2.COLOR_RGB2GRAY), "mono8")
             img_msg.header.stamp = ros_data.header.stamp
